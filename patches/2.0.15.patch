@@ -1,0 +1,299 @@
+diff --git a/cmd/micro/initlua.go b/cmd/micro/initlua.go
+index ffe175a0..f4bd9573 100644
+--- a/cmd/micro/initlua.go
++++ b/cmd/micro/initlua.go
+@@ -106,6 +106,7 @@ func luaImportMicroShell() *lua.LTable {
+ 	ulua.L.SetField(pkg, "JobSpawn", luar.New(ulua.L, shell.JobSpawn))
+ 	ulua.L.SetField(pkg, "JobStop", luar.New(ulua.L, shell.JobStop))
+ 	ulua.L.SetField(pkg, "JobSend", luar.New(ulua.L, shell.JobSend))
++	ulua.L.SetField(pkg, "HttpStream", luar.New(ulua.L, shell.HttpStream))
+ 	ulua.L.SetField(pkg, "RunTermEmulator", luar.New(ulua.L, action.RunTermEmulator))
+ 	ulua.L.SetField(pkg, "TermEmuSupported", luar.New(ulua.L, action.TermEmuSupported))
+ 
+diff --git a/go.mod b/go.mod
+index a78166d7..29d88ed5 100644
+--- a/go.mod
++++ b/go.mod
+@@ -31,6 +31,7 @@ require (
+ 	github.com/zyedidia/poller v1.0.1 // indirect
+ 	golang.org/x/sys v0.30.0 // indirect
+ 	golang.org/x/term v0.29.0 // indirect
++	layeh.com/gopher-json v0.0.0-20201124131017-552bb3c4c3bf // indirect
+ )
+ 
+ replace github.com/kballard/go-shellquote => github.com/micro-editor/go-shellquote v0.0.0-20250101105543-feb6c39314f5
+diff --git a/go.sum b/go.sum
+index 2acd88f5..023d4349 100644
+--- a/go.sum
++++ b/go.sum
+@@ -74,3 +74,5 @@ gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+ gopkg.in/yaml.v2 v2.2.4/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+ gopkg.in/yaml.v2 v2.2.8 h1:obN1ZagJSUGI0Ek/LBmuj4SNLPfIny3KsKFopxRdj10=
+ gopkg.in/yaml.v2 v2.2.8/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
++layeh.com/gopher-json v0.0.0-20201124131017-552bb3c4c3bf h1:rRz0YsF7VXj9fXRF6yQgFI7DzST+hsI3TeFSGupntu0=
++layeh.com/gopher-json v0.0.0-20201124131017-552bb3c4c3bf/go.mod h1:ivKkcY8Zxw5ba0jldhZCYYQfGdb2K6u9tbYK1AwMIBc=
+diff --git a/internal/buffer/buffer.go b/internal/buffer/buffer.go
+index ce36988b..5bcf4ae7 100644
+--- a/internal/buffer/buffer.go
++++ b/internal/buffer/buffer.go
+@@ -266,6 +266,23 @@ type Buffer struct {
+ 	// Insert key by default) i.e. that typing a character shall replace the
+ 	// character under the cursor instead of inserting a character before it.
+ 	OverwriteMode bool
++
++	// VirtualText stores ghost text to be rendered
++	VirtualText string
++	// VirtualTextLoc stores where the ghost text begins
++	VirtualTextLoc Loc
++}
++
++// SetVirtualText sets the virtual text and its starting location.
++func (b *Buffer) SetVirtualText(text string) {
++	b.VirtualText = text
++	b.VirtualTextLoc = b.GetActiveCursor().Loc
++}
++
++// ClearVirtualText clears any active virtual text.
++func (b *Buffer) ClearVirtualText() {
++	b.VirtualText = ""
++	b.VirtualTextLoc = Loc{-1, -1}
+ }
+ 
+ // NewBufferFromFileWithCommand opens a new buffer with a given command
+diff --git a/internal/display/bufwindow.go b/internal/display/bufwindow.go
+index 369ea35b..d5445125 100644
+--- a/internal/display/bufwindow.go
++++ b/internal/display/bufwindow.go
+@@ -677,7 +677,7 @@ func (w *BufWindow) displayBuffer() {
+ 
+ 			screen.SetContent(w.X+vloc.X, w.Y+vloc.Y, r, combc, style)
+ 
+-			if showcursor {
++			if showcursor && !(w.Buf.VirtualText != "" && bloc == w.Buf.VirtualTextLoc) {
+ 				for _, c := range cursors {
+ 					if c.X == bloc.X && c.Y == bloc.Y && !c.HasSelection() {
+ 						w.showCursor(w.X+vloc.X, w.Y+vloc.Y, c.Num == 0)
+@@ -772,6 +772,14 @@ func (w *BufWindow) displayBuffer() {
+ 			}
+ 
+ 			for _, r := range word {
++				if w.Buf.VirtualText != "" && bloc == w.Buf.VirtualTextLoc {
++					for _, c := range cursors {
++						if c.X == bloc.X && c.Y == bloc.Y && !c.HasSelection() {
++							w.showCursor(w.X+vloc.X, w.Y+vloc.Y, c.Num == 0)
++						}
++					}
++					w.drawVirtualText(w.Buf.VirtualText, &vloc, maxWidth, softwrap, draw, wrap)
++				}
+ 				drawrune, drawstyle, preservebg := getRuneStyle(r.r, r.style, 0, linex, false)
+ 				draw(drawrune, r.combc, drawstyle, true, true, preservebg)
+ 
+@@ -826,6 +834,14 @@ func (w *BufWindow) displayBuffer() {
+ 		}
+ 
+ 		if vloc.X != maxWidth {
++			if w.Buf.VirtualText != "" && bloc == w.Buf.VirtualTextLoc {
++				for _, c := range cursors {
++					if c.X == bloc.X && c.Y == bloc.Y && !c.HasSelection() {
++						w.showCursor(w.X+vloc.X, w.Y+vloc.Y, c.Num == 0)
++					}
++				}
++				w.drawVirtualText(w.Buf.VirtualText, &vloc, maxWidth, softwrap, draw, wrap)
++			}
+ 			// Display newline within a selection
+ 			drawrune, drawstyle, preservebg := getRuneStyle(' ', config.DefStyle, 0, totalwidth, true)
+ 			draw(drawrune, nil, drawstyle, true, true, preservebg)
+diff --git a/internal/display/virtual.go b/internal/display/virtual.go
+new file mode 100644
+index 00000000..5c6f6153
+--- /dev/null
++++ b/internal/display/virtual.go
+@@ -0,0 +1,70 @@
++package display
++
++import (
++	"strings"
++
++	"github.com/mattn/go-runewidth"
++	"github.com/micro-editor/tcell/v2"
++
++	"github.com/zyedidia/micro/v2/internal/buffer"
++	"github.com/zyedidia/micro/v2/internal/config"
++)
++
++// drawVirtualText handles rendering of ghost text without modifying the actual buffer.
++func (w *BufWindow) drawVirtualText(text string, vloc *buffer.Loc, maxWidth int, softwrap bool,
++	draw func(r rune, combc []rune, style tcell.Style, highlight bool, showcursor bool, preservebg bool),
++	wrap func()) {
++
++	style := config.DefStyle.Foreground(tcell.ColorGray)
++	if s, ok := config.Colorscheme["virtual-text"]; ok {
++		style = s
++	}
++
++	if colorOpt := config.GetGlobalOption("copilot.text_color"); colorOpt != nil {
++		if colorStr, ok := colorOpt.(string); ok && colorStr != "" {
++			if parsedColor, valid := config.StringToColor(colorStr); valid {
++				style = config.DefStyle.Foreground(parsedColor)
++			}
++		}
++	}
++
++	lines := strings.Split(text, "\n")
++	for i, line := range lines {
++		for _, r := range line {
++			width := runewidth.RuneWidth(r)
++
++			// Wrap if necessary
++			if vloc.X+width > maxWidth && vloc.X > w.gutterOffset {
++				for vloc.X < maxWidth {
++					draw(' ', nil, config.DefStyle, false, false, true)
++				}
++				if softwrap {
++					vloc.Y++
++					if vloc.Y >= w.bufHeight {
++						break
++					}
++					wrap()
++				} else {
++					break
++				}
++			}
++
++			draw(r, nil, style, false, false, false)
++			// draw() increments vlocX
++			for j := 1; j < width; j++ {
++				draw(' ', nil, style, false, false, false)
++			}
++		}
++		if i < len(lines)-1 {
++			// Virtual newline
++			for vloc.X < maxWidth {
++				draw(' ', nil, config.DefStyle, false, false, true)
++			}
++			vloc.Y++
++			if vloc.Y >= w.bufHeight {
++				break
++			}
++			wrap()
++		}
++	}
++}
+diff --git a/internal/lua/lua.go b/internal/lua/lua.go
+index 58347f2f..b3661337 100644
+--- a/internal/lua/lua.go
++++ b/internal/lua/lua.go
+@@ -22,6 +22,7 @@ import (
+ 
+ 	humanize "github.com/dustin/go-humanize"
+ 	lua "github.com/yuin/gopher-lua"
++	json "layeh.com/gopher-json"
+ 	luar "layeh.com/gopher-luar"
+ )
+ 
+@@ -76,6 +77,8 @@ func Import(pkg string) *lua.LTable {
+ 		return importHumanize()
+ 	case "net/http", "http":
+ 		return importHTTP()
++	case "encoding/json", "json":
++		return importJson()
+ 	case "archive/zip":
+ 		return importArchiveZip()
+ 	default:
+@@ -601,3 +604,30 @@ func importArchiveZip() *lua.LTable {
+ 
+ 	return pkg
+ }
++
++func importJson() *lua.LTable {
++	pkg := L.NewTable()
++	L.SetField(pkg, "decode", L.NewFunction(func(L *lua.LState) int {
++		str := L.CheckString(1)
++		val, err := json.Decode(L, []byte(str))
++		if err != nil {
++			L.Push(lua.LNil)
++			L.Push(lua.LString(err.Error()))
++			return 2
++		}
++		L.Push(val)
++		return 1
++	}))
++	L.SetField(pkg, "encode", L.NewFunction(func(L *lua.LState) int {
++		val := L.CheckAny(1)
++		data, err := json.Encode(val)
++		if err != nil {
++			L.Push(lua.LNil)
++			L.Push(lua.LString(err.Error()))
++			return 2
++		}
++		L.Push(lua.LString(string(data)))
++		return 1
++	}))
++	return pkg
++}
+diff --git a/internal/shell/http_stream.go b/internal/shell/http_stream.go
+new file mode 100644
+index 00000000..e4fda5fd
+--- /dev/null
++++ b/internal/shell/http_stream.go
+@@ -0,0 +1,60 @@
++package shell
++
++import (
++	"bufio"
++	"context"
++	"net/http"
++	"strings"
++)
++
++type StreamJob struct {
++	cancel context.CancelFunc
++}
++
++func (s *StreamJob) Cancel() {
++	s.cancel()
++}
++
++// HttpStream starts an HTTP request in the background and streams the response line by line to the callback
++func HttpStream(method, url string, body string, headers []string, onData func(string, []any), userargs ...any) *StreamJob {
++	ctx, cancel := context.WithCancel(context.Background())
++	sj := &StreamJob{cancel}
++
++	go func() {
++		req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
++		if err != nil {
++			if onData != nil {
++				Jobs <- JobFunction{onData, "error: " + err.Error(), userargs}
++			}
++			return
++		}
++		for i := 0; i < len(headers); i += 2 {
++			req.Header.Add(headers[i], headers[i+1])
++		}
++
++		client := &http.Client{Timeout: 0}
++		resp, err := client.Do(req)
++		if err != nil {
++			if onData != nil {
++				Jobs <- JobFunction{onData, "error: " + err.Error(), userargs}
++			}
++			return
++		}
++		defer resp.Body.Close()
++
++		reader := bufio.NewScanner(resp.Body)
++		for reader.Scan() {
++			line := reader.Text()
++			if onData != nil {
++				Jobs <- JobFunction{onData, line, userargs}
++			}
++		}
++		if err := reader.Err(); err != nil {
++			if onData != nil {
++				Jobs <- JobFunction{onData, "error: " + err.Error(), userargs}
++			}
++		}
++	}()
++
++	return sj
++}
